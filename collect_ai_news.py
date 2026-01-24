@@ -74,12 +74,12 @@ def generate_daily_report(overseas_news: List[Dict], domestic_news: List[Dict]) 
 
 """
     
-    for i, news in enumerate(overseas_news[:5], 1):
+    for i, news in enumerate(overseas_news[:8], 1):
         report += f"### {i}. **{news['title']}**\n- **来源**: {news['source']}\n- **摘要**: {news['summary']}\n- **链接**: {news['link']}\n\n"
     
     report += "## 🇨🇳 国内动态\n\n"
     
-    for i, news in enumerate(domestic_news[:5], 1):
+    for i, news in enumerate(domestic_news[:8], 1):
         report += f"### {i}. **{news['title']}**\n- **来源**: {news['source']}\n- **摘要**: {news['summary']}\n- **链接**: {news['link']}\n\n"
     
     report += f"""## 💡 今日亮点
