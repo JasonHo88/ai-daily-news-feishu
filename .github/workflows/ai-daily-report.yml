@@ -10,14 +10,13 @@ on:
   workflow_dispatch:
     inputs:
       debug:
-        description: '调试模式（输出更多信息）'
+        description: '调试模式'
         required: false
         default: 'false'
 
 # 权限设置
 permissions:
   contents: read
-  statuses: read
 
 # 任务定义
 jobs:
@@ -43,32 +42,28 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests python-dotenv
           
-      # 4. 创建环境变量文件
-      - name: Create environment file
+      # 4. 执行AI资讯收集和推送（一体化脚本）
+      - name: Collect AI News and Push to Feishu
+        env:
+          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
         run: |
-          echo "FEISHU_WEBHOOK_URL=${{ secrets.FEISHU_WEBHOOK_URL }}" > .env
-          cat .env
-          
-      # 5. 执行AI资讯收集
-      - name: Collect AI News
-        id: collect
-        run: |
-          echo "=== 开始收集AI资讯 ==="
+          echo "========================================"
+          echo "🤖 AI资讯自动收集任务"
           echo "时间: $(date)"
+          echo "========================================"
+          
+          # 直接运行主脚本
           python collect_ai_news.py
-          echo "exit_code=$?" >> $GITHUB_OUTPUT
           
-      # 6. 推送结果到飞书（如果成功）
-      - name: Push to Feishu
-        if: ${{ steps.collect.outputs.exit_code == '0' }}
-        run: |
-          echo "=== 推送到飞书 ==="
-          python push_to_feishu.py
-          
-      # 7. 发送失败通知（如果失败）
-      - name: Notify on failure
-        if: ${{ failure() }}
-        run: |
-          echo "❌ AI资讯收集任务失败！"
-          echo "请检查工作流日志。"
-          # 可以添加邮件通知、Slack通知等
+          # 记录执行结果
+          if [ $? -eq 0 ]; then
+            echo ""
+            echo "========================================"
+            echo "✅ 任务完成！"
+            echo "========================================"
+          else
+            echo ""
+            echo "========================================"
+            echo "❌ 任务执行完成（部分步骤可能失败）"
+            echo "========================================"
+          fi
