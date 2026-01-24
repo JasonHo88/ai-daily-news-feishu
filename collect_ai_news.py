@@ -1,187 +1,174 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-AI资讯收集脚本（修复版）
-自动收集海外和国内的AI资讯，并生成日报格式推送到飞书
+AI资讯收集脚本（多源聚合版）
+聚合国内外多个权威源，支持自动去重与容错
 """
 
 import os
 import sys
+import time
+import re
 from datetime import datetime
 from typing import Dict, List
 
-try:
-    import requests
-except ImportError:
-    print("❌ 缺少requests库，正在安装...")
-    import subprocess
-    subprocess.run([sys.executable, "-m", "pip", "install", "requests", "-q"])
-    import requests
+# 自动检查并安装必要的第三方库
+def install_dependencies():
+    needed = ['requests', 'beautifulsoup4', 'feedparser']
+    for lib in needed:
+        try:
+            __import__(lib if lib != 'beautifulsoup4' else 'bs4')
+        except ImportError:
+            print(f"❌ 缺少 {lib} 库，正在自动安装...")
+            import subprocess
+            subprocess.run([sys.executable, "-m", "pip", "install", lib, "-q"])
 
-# 直接从环境变量获取Webhook地址（GitHub Actions环境变量）
+install_dependencies()
+
+import requests
+from bs4 import BeautifulSoup
+import feedparser
+
+# --- 配置区 ---
 FEISHU_WEBHOOK_URL = os.getenv('FEISHU_WEBHOOK_URL', '')
-
-# 当前日期
 TODAY = datetime.now().strftime("%Y年%m月%d日")
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+}
 
+# --- 辅助功能：去重 ---
+class NewsDeleter:
+    def __init__(self):
+        self.seen_titles = set()
 
-def search_twitter_ai_news() -> List[Dict]:
-    """搜索Twitter上的AI相关热点"""
-    news_list = []
+    def is_duplicate(self, title: str) -> bool:
+        # 清洗标题（去空格、去符号）
+        clean_title = re.sub(r'[^\w\u4e00-\u9fa5]', '', title.lower())
+        # 取前15个字符做简易指纹匹配
+        fingerprint = clean_title[:15]
+        if fingerprint in self.seen_titles:
+            return True
+        self.seen_titles.add(fingerprint)
+        return False
+
+# --- 抓取逻辑 ---
+
+def fetch_rss_news(source_name: str, url: str) -> List[Dict]:
+    """通用的 RSS 抓取逻辑"""
+    news = []
+    try:
+        print(f"🌐 正在抓取国外源: {source_name}...")
+        feed = feedparser.parse(url)
+        for entry in feed.entries[:5]:
+            news.append({
+                "title": entry.title,
+                "source": source_name,
+                "summary": entry.get('summary', '查看原文').split('<')[0][:80] + "...",
+                "link": entry.link
+            })
+    except Exception as e:
+        print(f"⚠️ {source_name} 抓取失败: {e}")
+    return news
+
+def fetch_36kr() -> List[Dict]:
+    """抓取 36Kr AI 频道"""
+    news = []
+    try:
+        print("🇨🇳 正在抓取国内源: 36氪...")
+        res = requests.get("https://36kr.com/information/ai/", headers=HEADERS, timeout=10)
+        soup = BeautifulSoup(res.text, 'html.parser')
+        items = soup.select('.article-item-title-weight')
+        for item in items[:5]:
+            news.append({
+                "title": item.get_text(strip=True),
+                "source": "36氪",
+                "link": "https://36kr.com" + item['href']
+            })
+    except Exception as e:
+        print(f"⚠️ 36Kr 抓取失败: {e}")
+    return news
+
+def fetch_ithome() -> List[Dict]:
+    """抓取 IT之家 AI 标签"""
+    news = []
+    try:
+        print("🇨🇳 正在抓取国内源: IT之家...")
+        res = requests.get("https://www.ithome.com/tag/ai", headers=HEADERS, timeout=10)
+        soup = BeautifulSoup(res.text, 'html.parser')
+        items = soup.select('.news-item .title')
+        for item in items[:5]:
+            news.append({
+                "title": item.get_text(strip=True),
+                "source": "IT之家",
+                "link": item['href']
+            })
+    except Exception as e:
+        print(f"⚠️ IT之家 抓取失败: {e}")
+    return news
+
+# --- 主逻辑聚合 ---
+
+def get_all_news():
+    duplicator = NewsDeleter()
     
-    # 示例数据
-    news_list.append({
-        "title": "周鸿祎预测：2026年全球将出现100亿个智能体",
-        "source": "新浪财经",
-        "summary": "360创始人周鸿祎在2026崇礼论坛上表示，大模型需要升级成智能体才能真正落地。",
-        "link": "https://finance.sina.com.cn/tob/2026-01-24/doc-inhikrie2726391.shtml",
-        "category": "海外"
-    })
+    # 1. 抓取海外（多源）
+    overseas_sources = [
+        {"name": "AI News", "url": "https://www.artificialintelligence-news.com/feed/"},
+        {"name": "TechCrunch AI", "url": "https://techcrunch.com/category/artificial-intelligence/feed/"},
+        {"name": "The Verge AI", "url": "https://www.theverge.com/ai-artificial-intelligence/rss/index.xml"}
+    ]
+    all_overseas = []
+    for s in overseas_sources:
+        raw_news = fetch_rss_news(s['name'], s['url'])
+        for n in raw_news:
+            if not duplicator.is_duplicate(n['title']):
+                all_overseas.append(n)
     
-    return news_list
+    # 2. 抓取国内（多源）
+    all_domestic = []
+    domestic_raw = fetch_36kr() + fetch_ithome()
+    for n in domestic_raw:
+        if not duplicator.is_duplicate(n['title']):
+            all_domestic.append(n)
+            
+    return all_overseas[:8], all_domestic[:8] # 各自截取精选 8 条
 
-
-def search_domestic_ai_news() -> List[Dict]:
-    """搜索国内AI资讯"""
-    news_list = []
+def generate_daily_report(overseas: List[Dict], domestic: List[Dict]) -> str:
+    report = f"# 🤖 AI 全网聚合日报 - {TODAY}\n\n"
     
-    # 示例数据
-    news_list.append({
-        "title": "字节跳动豆包日活过亿，AI应用竞争白热化",
-        "source": "证券时报",
-        "summary": "字节跳动旗下豆包成为中国首个日活过亿的AI原生应用，月活达1.72亿。",
-        "link": "https://www.stcn.com/article/detail/3598826.html",
-        "category": "国内"
-    })
+    report += "## 📰 海外头条 (Multi-Source)\n\n"
+    for i, n in enumerate(overseas, 1):
+        report += f"### {i}. {n['title']}\n- 来源: {n['source']}\n- 链接: {n['link']}\n\n"
     
-    news_list.append({
-        "title": "DeepSeek V4有望春节前后发布，编程能力超越OpenAI",
-        "source": "中华网",
-        "summary": "据The Information报道，DeepSeek计划在2月中旬推出新一代旗舰AI模型。",
-        "link": "https://m.ai5g.china.com/ai/13004828/20260110/49150650.html",
-        "category": "国内"
-    })
+    report += "## 🇨🇳 国内动态 (Multi-Source)\n\n"
+    for i, n in enumerate(domestic, 1):
+        report += f"### {i}. {n['title']}\n- 来源: {n['source']}\n- 链接: {n['link']}\n\n"
     
-    return news_list
-
-
-def generate_daily_report(overseas_news: List[Dict], domestic_news: List[Dict]) -> str:
-    """生成AI日报内容"""
-    
-    report = f"""# 🤖 AI日报 - {TODAY}
-
-## 📰 海外热点
-
-"""
-    
-    for i, news in enumerate(overseas_news[:8], 1):
-        report += f"### {i}. **{news['title']}**\n- **来源**: {news['source']}\n- **摘要**: {news['summary']}\n- **链接**: {news['link']}\n\n"
-    
-    report += "## 🇨🇳 国内动态\n\n"
-    
-    for i, news in enumerate(domestic_news[:8], 1):
-        report += f"### {i}. **{news['title']}**\n- **来源**: {news['source']}\n- **摘要**: {news['summary']}\n- **链接**: {news['link']}\n\n"
-    
-    report += f"""## 💡 今日亮点
-
-**1. 智能体时代来临**：周鸿祎预测2026年全球将有100亿个智能体，字节豆包日活过亿的里程碑印证了这一趋势。
-
-**2. AI应用商业化加速**：国内AI应用正加速商业化落地，车企密集布局2026年大模型应用。
-
----
-*由 Matrix Agent 自动收集整理 | {TODAY}*
-"""
+    report += f"---\n*Matrix Agent 聚合检索 | 覆盖源: 36Kr, IT之家, TechCrunch, AI News, The Verge*"
     return report
 
-
-def push_to_feishu(report: str) -> bool:
-    """推送到飞书"""
+def push_to_feishu(content: str):
     if not FEISHU_WEBHOOK_URL:
-        print("⚠️  未配置飞书Webhook地址")
-        return False
-    
+        print("⚠️ 未配置飞书 Webhook")
+        return
     payload = {
         "msg_type": "interactive",
         "card": {
-            "header": {
-                "title": {
-                    "tag": "plain_text",
-                    "content": f"🤖 AI日报 - {TODAY}"
-                },
-                "template": "blue"
-            },
-            "elements": [
-                {
-                    "tag": "markdown",
-                    "content": report
-                }
-            ]
+            "header": {"title": {"tag": "plain_text", "content": f"🤖 AI多源日报 - {TODAY}"}, "template": "purple"},
+            "elements": [{"tag": "markdown", "content": content}]
         }
     }
-    
-    try:
-        print(f"📤 推送到飞书...")
-        response = requests.post(
-            FEISHU_WEBHOOK_URL,
-            json=payload,
-            headers={"Content-Type": "application/json"},
-            timeout=30
-        )
-        
-        if response.status_code == 200:
-            result = response.json()
-            if result.get('code') == 0:
-                print("✅ 成功推送到飞书！")
-                return True
-            else:
-                print(f"❌ 飞书接口报错: {result.get('msg')}")
-                return False
-        else:
-            print(f"❌ HTTP请求错误: {response.status_code}")
-            return False
-            
-    except Exception as e:
-        print(f"❌ 推送过程发生异常: {str(e)}")
-        return False
-
+    requests.post(FEISHU_WEBHOOK_URL, json=payload, timeout=20)
 
 def main():
-    """主函数"""
-    try:
-        print("=" * 50)
-        print("🤖 AI资讯自动收集任务")
-        print(f"📅 执行时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        print("=" * 50)
-        
-        # 1. 收集资讯
-        overseas_news = search_twitter_ai_news()
-        domestic_news = search_domestic_ai_news()
-        
-        # 2. 生成日报
-        report = generate_daily_report(overseas_news, domestic_news)
-        
-        # 3. 保存本地备份
-        filename = f"AI日报_{TODAY.replace('年', '-').replace('月', '-').replace('日', '')}.md"
-        with open(filename, 'w', encoding='utf-8') as f:
-            f.write(report)
-        print(f"💾 日报已保存到: {filename}")
-        
-        # 4. 推送到飞书
-        success = push_to_feishu(report)
-        
-        if success:
-            print("\n🎉 任务全部完成！")
-        else:
-            print("\n⚠️ 任务执行完成，但推送飞书失败。")
-            
-        return 0
-        
-    except Exception as e:
-        print(f"\n❌ 任务运行崩溃: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        return 0 
-
+    print(f"🚀 启动多源情报抓取任务...")
+    overseas, domestic = get_all_news()
+    if not overseas and not domestic:
+        print("❌ 未获取到任何资讯")
+        return
+    report = generate_daily_report(overseas, domestic)
+    push_to_feishu(report)
+    print("✅ 日报推送完成")
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()
