@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-AI资讯收集脚本（全中文+多源保底版）
-1. 自动翻译海外源 
-2. 国内接入：36Kr + 界面新闻 + 新浪科技（多源互补）
+AI资讯收集脚本（多源 RSS 旗舰版）
+1. 国内源：36Kr, IT之家, 少数派, 极客公园, 虎嗅 (全 RSS 驱动)
+2. 国外源：AI News, TechCrunch (全自动中文翻译)
+3. 核心机制：多源均衡、指纹去重、在线翻译
 """
 
 import os
@@ -14,11 +15,10 @@ from typing import Dict, List
 
 # 依赖库自动安装
 def install_dependencies():
-    needed = ['requests', 'beautifulsoup4', 'feedparser', 'deep-translator']
+    needed = ['requests', 'feedparser', 'deep-translator']
     for lib in needed:
         try:
-            if lib == 'beautifulsoup4': __import__('bs4')
-            else: __import__(lib.replace('-', '_'))
+            __import__(lib.replace('-', '_'))
         except ImportError:
             print(f"❌ 正在安装 {lib}...")
             import subprocess
@@ -27,17 +27,14 @@ def install_dependencies():
 install_dependencies()
 
 import requests
-from bs4 import BeautifulSoup
 import feedparser
 from deep_translator import GoogleTranslator
 
 # --- 环境配置 ---
 FEISHU_WEBHOOK_URL = os.getenv('FEISHU_WEBHOOK_URL', '')
 TODAY = datetime.now().strftime("%Y年%m月%d日")
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-}
 
+# 初始化翻译器 (英翻中)
 translator = GoogleTranslator(source='auto', target='zh-CN')
 
 class NewsEngine:
@@ -47,107 +44,109 @@ class NewsEngine:
     def translate(self, text: str) -> str:
         if not text: return ""
         try:
+            # 翻译标题，保留一些专业术语不被误翻
             return translator.translate(text)
         except: return text
 
     def is_dup(self, title: str) -> bool:
-        clean = re.sub(r'[^\w\u4e00-\u9fa5]', '', title.lower())[:12]
-        if clean in self.seen_titles: return True
+        """根据标题前15个字符进行简易指纹去重"""
+        clean = re.sub(r'[^\w\u4e00-\u9fa5]', '', title.lower())[:15]
+        if not clean or clean in self.seen_titles: return True
         self.seen_titles.add(clean)
         return False
 
-# --- 国内源抓取 (多源互补) ---
+# --- 抓取逻辑 ---
 
-def fetch_domestic(engine: NewsEngine) -> List[Dict]:
+def fetch_domestic_rss(engine: NewsEngine) -> List[Dict]:
+    """聚合国内多个科技媒体 RSS"""
+    sources = [
+        {"name": "36氪", "url": "https://36kr.com/feed-article"},
+        {"name": "IT之家", "url": "https://www.ithome.com/rss/"},
+        {"name": "少数派", "url": "https://sspai.com/feed"},
+        {"name": "极客公园", "url": "http://www.geekpark.net/rss"},
+        {"name": "虎嗅", "url": "https://www.huxiu.com/rss/0.xml"}
+    ]
     results = []
     
-    # 来源1: 界面新闻 (AI频道 - 稳定性高)
-    try:
-        print("🇨🇳 正在抓取 界面新闻...")
-        res = requests.get("https://www.jiemian.com/lists/211.html", headers=HEADERS, timeout=10)
-        soup = BeautifulSoup(res.text, 'html.parser')
-        items = soup.select('.news-view .news-header a')
-        for item in items[:5]:
-            title = item.get_text(strip=True)
-            if not engine.is_dup(title):
-                results.append({"title": title, "source": "界面新闻", "link": item['href']})
-    except: pass
-
-    # 来源2: 36Kr (修复后的选择器)
-    try:
-        print("🇨🇳 正在尝试 36Kr...")
-        res = requests.get("https://36kr.com/information/ai/", headers=HEADERS, timeout=10)
-        soup = BeautifulSoup(res.text, 'html.parser')
-        # 锁定文章信息流区域，避开导航栏
-        items = soup.select('a.article-item-title-weight, .kr-flow-article-item a.article-item-title')
-        for item in items[:5]:
-            title = item.get_text(strip=True)
-            if title and len(title) > 5 and not engine.is_dup(title):
-                link = item['href'] if item['href'].startswith('http') else f"https://36kr.com{item['href']}"
-                results.append({"title": title, "source": "36氪", "link": link})
-    except: pass
-
+    for src in sources:
+        try:
+            print(f"🇨🇳 正在同步 {src['name']}...")
+            feed = feedparser.parse(src['url'])
+            # 每个源取前 2-3 条最及时的，保持日报紧凑
+            count = 0
+            for entry in feed.entries:
+                if count >= 3: break
+                if not engine.is_dup(entry.title):
+                    results.append({
+                        "title": entry.title,
+                        "source": src['name'],
+                        "link": entry.link
+                    })
+                    count += 1
+        except Exception as e:
+            print(f"⚠️ {src['name']} 访问受限: {e}")
+            
     return results
 
-# --- 海外源抓取 (带翻译) ---
-
-def fetch_overseas(engine: NewsEngine) -> List[Dict]:
+def fetch_overseas_rss(engine: NewsEngine) -> List[Dict]:
+    """抓取海外源并翻译"""
     sources = [
         {"name": "AI News", "url": "https://www.artificialintelligence-news.com/feed/"},
         {"name": "TechCrunch", "url": "https://techcrunch.com/category/artificial-intelligence/feed/"}
     ]
     results = []
-    for s in sources:
+    for src in sources:
         try:
-            print(f"🌐 正在获取并翻译 {s['name']}...")
-            feed = feedparser.parse(s['url'])
+            print(f"🌐 正在抓取并翻译 {src['name']}...")
+            feed = feedparser.parse(src['url'])
             for entry in feed.entries[:4]:
-                raw_title = entry.title
-                if not engine.is_dup(raw_title):
+                if not engine.is_dup(entry.title):
                     results.append({
-                        "title": engine.translate(raw_title),
-                        "source": s['name'],
+                        "title": engine.translate(entry.title),
+                        "source": src['name'],
                         "link": entry.link
                     })
         except: pass
     return results
 
-# --- 执行与推送 ---
+# --- 推送逻辑 ---
 
 def main():
     engine = NewsEngine()
-    overseas = fetch_overseas(engine)
-    domestic = fetch_domestic(engine)
+    print("=" * 30)
+    domestic = fetch_domestic_rss(engine)
+    overseas = fetch_overseas_rss(engine)
     
-    if not overseas and not domestic:
-        print("❌ 未获取到任何数据")
+    if not domestic and not overseas:
+        print("❌ 全网资讯连接失败")
         return
 
-    report = f"# 🤖 AI全网中文日报 - {TODAY}\n\n"
+    # 构建飞书消息体
+    report = f"# 🤖 AI & 科技全网聚合日报 - {TODAY}\n\n"
     
-    report += "## 📰 海外热点 (翻译版)\n\n"
-    for i, n in enumerate(overseas[:6], 1):
+    report += "## 🌏 海外前沿 (智能翻译)\n\n"
+    for i, n in enumerate(overseas[:8], 1):
         report += f"**{i}. {n['title']}**\n- 来源: {n['source']} | [原文链接]({n['link']})\n\n"
     
-    report += "## 🇨🇳 国内动态 (多源精选)\n\n"
-    if not domestic:
-        report += "_⚠️ 国内源连接中，建议稍后重试_\n\n"
-    for i, n in enumerate(domestic[:6], 1):
-        report += f"**{i}. {n['title']}**\n- 来源: {n['source']} | [查看详情]({n['link']})\n\n"
+    report += "## 🇨🇳 国内动态 (多源聚合)\n\n"
+    for i, n in enumerate(domestic[:10], 1):
+        report += f"**{i}. {n['title']}**\n- 来源: {n['source']} | [阅读全文]({n['link']})\n\n"
     
-    report += f"---\n*Matrix Agent 自动聚合翻译 | {TODAY}*"
+    report += f"---\n*情报覆盖: 36Kr, IT之家, 少数派, 极客公园, 虎嗅, AI News, TechCrunch*"
 
-    # 发送飞书
     if FEISHU_WEBHOOK_URL:
         payload = {
             "msg_type": "interactive",
             "card": {
-                "header": {"title": {"tag": "plain_text", "content": f"🤖 AI日报 (全中文版) - {TODAY}"}, "template": "blue"},
+                "header": {"title": {"tag": "plain_text", "content": f"🤖 全球AI科技日报 - {TODAY}"}, "template": "purple"},
                 "elements": [{"tag": "markdown", "content": report}]
             }
         }
         requests.post(FEISHU_WEBHOOK_URL, json=payload, timeout=20)
-        print("✅ 推送成功！")
+        print("✅ 日报推送成功！")
+    else:
+        print("\n--- 预览内容 ---\n")
+        print(report)
 
 if __name__ == "__main__":
     main()
