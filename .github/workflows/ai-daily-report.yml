@@ -1,69 +1,39 @@
 name: AI资讯日报自动收集
 
-# 触发方式：
-# 1. 定时触发：每天UTC 0点（北京时间8点）
-# 2. 手动触发：点击按钮即可运行
 on:
   schedule:
-    # 每天UTC 0点执行（北京时间8:00）
+    # 每天北京时间 08:00 (UTC 00:00)
     - cron: '0 0 * * *'
-  workflow_dispatch:
-    inputs:
-      debug:
-        description: '调试模式'
-        required: false
-        default: 'false'
+  workflow_dispatch: # 保留手动触发按钮
 
-# 权限设置
 permissions:
   contents: read
 
-# 任务定义
 jobs:
   collect-and-push:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15 # 资讯任务通常 5 分钟内完成
     
     steps:
-      # 1. 检出代码
-      - name: Checkout code
+      - name: 检出代码
         uses: actions/checkout@v4
         
-      # 2. 设置Python环境
-      - name: Set up Python
+      - name: 设置 Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
           cache: 'pip'
           
-      # 3. 安装依赖
-      - name: Install dependencies
+      - name: 安装必要依赖
         run: |
           python -m pip install --upgrade pip
-          pip install requests python-dotenv
+          # 必须安装脚本用到的所有库
+          pip install requests feedparser deep-translator
           
-      # 4. 执行AI资讯收集和推送（一体化脚本）
-      - name: Collect AI News and Push to Feishu
+      - name: 执行 AI 资讯收集
         env:
+          # 确保你在仓库的 Secrets 中设置了 FEISHU_WEBHOOK_URL
           FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
         run: |
-          echo "========================================"
-          echo "🤖 AI资讯自动收集任务"
-          echo "时间: $(date)"
-          echo "========================================"
-          
-          # 直接运行主脚本
+          echo "🚀 任务启动时间: $(date)"
           python collect_ai_news.py
-          
-          # 记录执行结果
-          if [ $? -eq 0 ]; then
-            echo ""
-            echo "========================================"
-            echo "✅ 任务完成！"
-            echo "========================================"
-          else
-            echo ""
-            echo "========================================"
-            echo "❌ 任务执行完成（部分步骤可能失败）"
-            echo "========================================"
-          fi
